@@ -38,6 +38,9 @@ class SimpleAgent:
 
     def get_next_action_in_game(self, game_state):
         self.game = game_state
+        if not self.game.in_combat:
+            return None
+        
         #time.sleep(0.07)
         if self.game.choice_available:
             return self.handle_screen()
@@ -55,7 +58,8 @@ class SimpleAgent:
             return CancelAction()
 
     def get_next_action_out_of_game(self):
-        return StartGameAction(self.chosen_class)
+        # return StartGameAction(self.chosen_class)
+        return None
 
     def is_monster_attacking(self):
         for monster in self.game.monsters:
