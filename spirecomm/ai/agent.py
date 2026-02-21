@@ -278,3 +278,183 @@ class SimpleAgent:
         # This should never happen
         return ChooseAction(0)
 
+import requests
+import time
+from spirecomm.communication.action import *
+from spirecomm.ai.agent import SimpleAgent
+
+import logging
+logger = logging.getLogger(__name__)
+
+class AlphaStSAgent(SimpleAgent):
+    def __init__(self, server_url="http://localhost:7999/execute"):
+        super().__init__()
+        self.url = server_url
+        self.session_id = None
+        self.bridge = AlphaStSBridge()
+
+    def call_ai(self, cmds):
+        logger.debug(f"Sending to Java: {cmds}")
+        try:
+            response = requests.post(self.url, json={"commands": cmds}, timeout=10).json()
+            if response["success"]:
+                logger.debug(f"Java Raw Output: {response['output']}")
+                return response["output"]
+            else:
+                logger.error(f"Java Server Logic Error: {response['error']}")
+        except Exception as e:
+            logger.error(f"Network Error calling Java AI: {e}")
+        return ""
+
+    def get_next_action_in_game(self, game_state):
+        self.game = game_state
+        
+        if not self.game.in_combat:
+            return super().get_next_action_in_game(game_state)
+
+        sync_cmds = self.bridge.get_sync_commands(self.game)
+        
+        response = self.call_ai(sync_cmds + ["decide 1000"])
+
+        return self.process_result(response)
+    
+    def process_result(self, output):
+        if "RESULT:" not in output:
+            logger.warning("AI didn't return a result, ending turn.")
+            return EndTurnAction()
+
+        res_line = [l for l in output.split('\n') if l.startswith("RESULT:")][-1]
+        _, ai_action_idx, ai_action_name, action_type = res_line.split(":")
+        
+        logger.info(f"Decision result: {ai_action_name}")
+
+        if "End Turn" in ai_action_name or "END_TURN" in ai_action_name:
+            return EndTurnAction()
+
+        living_monsters = [m for m in self.game.monsters if m.current_hp > 0 and not m.half_dead and not m.is_gone]
+
+        playable_cards = [c for c in self.game.hand if c.is_playable]
+        target_card = None
+        for card in playable_cards:
+            if self.bridge.clean_card_name(card) == ai_action_name:
+                target_card = card
+                break
+
+        if target_card:
+            if target_card.has_target:
+                living_monsters = [m for m in self.game.monsters if m.current_hp > 0]
+                
+                if len(living_monsters) == 1:
+                    return PlayCardAction(card=target_card, target_monster=living_monsters[0])
+
+                logger.info(f"Card {ai_action_name} requires target, guiding Java to enter monster selection mode...")
+                
+                sync_cmds = self.bridge.get_sync_commands(self.game)
+                guide_cmds = sync_cmds + [str(ai_action_idx), "decide 500"]
+                
+                target_response = self.call_ai(guide_cmds)
+                target_idx = self.extract_monster_index(target_response)
+                
+                logger.info(f"AI selected enemy index for multi-target: {target_idx}")
+                return PlayCardAction(card=target_card, target_monster=self.game.monsters[target_idx])
+
+            return PlayCardAction(card=target_card)
+
+        if self.game.choice_available:
+            try:
+                choice_idx = int(ai_action_idx)
+                logger.info(f"Executing dialog selection, index: {choice_idx}")
+                return ChooseAction(choice_idx)
+            except:
+                pass
+
+        logger.error(f"Unable to execute AI suggestion: {ai_action_name}, possible hand out of sync")
+        return EndTurnAction()
+
+    def extract_monster_index(self, output):
+        nums = re.findall(r'\((\d+)\)', output)
+        return int(nums[0]) if nums else 0
+    
+import re
+from spirecomm.communication.action import *
+from spirecomm.spire.character import Intent
+
+class AlphaStSBridge:
+    def __init__(self):
+        self.encounter_map = {
+            "Sentry": 0,
+            "Gremlin Nob": 1,
+            "Lagavulin": 2
+        }
+
+        self.static_move_map = {
+            "Gremlin Nob": {
+                1: 2,  # BULL_RUSH -> alphaStS: 2
+                2: 0,  # SKULL_BASH -> alphaStS: 0
+                3: 1   # BELLOW -> alphaStS: 1
+            },
+            "Sentry": {
+                3: 0,  # BOLT -> alphaStS: 0
+                4: 1   # BEAM -> alphaStS: 1
+            }
+        }
+
+    def get_java_move_index(self, monster, turn):
+        name = monster.name
+        real_id = monster.move_id
+
+        if name == "Lagavulin":
+            if real_id == 5:
+                return min(turn - 1, 2)
+            
+            if real_id == 4:
+                return 2
+            
+            if real_id == 5:
+                return 3
+            
+            if real_id == 3:
+                if getattr(monster, 'last_move_id', None) == 3:
+                    return 4
+                return 3
+            
+            if real_id == 1:
+                return 5
+            
+            return 0
+
+        if name in self.static_move_map:
+            return self.static_move_map[name].get(real_id, 0)
+
+        return 0
+
+    def clean_card_name(self, card):
+        name = card.name.split('_')[0]
+        return name
+
+    def get_sync_commands(self, game):
+        cmds = []
+        logger.info(f"--- Synchronizing State (Floor {game.floor}, Turn {game.turn}) ---")
+
+        main_monster = game.monsters[0].name
+        scene_idx = self.encounter_map.get(main_monster)
+        if scene_idx is not None:
+            cmds.append(f"se {scene_idx}")
+        cmds.append("0")
+
+        cmds.append(f"ph {game.player.current_hp}")
+        cmds.append(f"pe {game.player.energy}")
+        cmds.append(f"pb {game.player.block}")
+
+        for i, m in enumerate(game.monsters):
+            cmds.append(f"eh {i} {max(0, m.current_hp)}")
+            
+            if m.current_hp > 0:
+                java_move = self.get_java_move_index(m, game.turn)
+                cmds.append(f"em {i} {java_move}")
+                logger.debug(f"Monster[{i}] {m.name}: HP={m.current_hp}, Intent={m.intent}, JavaMove={java_move}")
+        
+        card_names = [self.clean_card_name(c) for c in game.hand]
+        cmds.append(f"sh {','.join(card_names)}")
+        logger.debug(f"Generated Commands: {cmds}")
+        return cmds
