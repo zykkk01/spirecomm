@@ -454,7 +454,8 @@ class AlphaStSBridge:
                 cmds.append(f"em {i} {java_move}")
                 logger.debug(f"Monster[{i}] {m.name}: HP={m.current_hp}, Intent={m.intent}, JavaMove={java_move}")
         
-        card_names = [self.clean_card_name(c) for c in game.hand]
-        cmds.append(f"sh {','.join(card_names)}")
+        cmds.append(f"sh {','.join([self.clean_card_name(c) for c in game.hand])}")
+        cmds.append(f"sd {','.join([self.clean_card_name(c) for c in game.discard_pile])}")
+        cmds.append(f"sx {','.join([self.clean_card_name(c) for c in game.exhaust_pile])}")
         logger.debug(f"Generated Commands: {cmds}")
         return cmds
