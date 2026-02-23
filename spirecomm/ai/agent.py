@@ -431,6 +431,12 @@ class AlphaStSBridge:
     def clean_card_name(self, card):
         name = card.name.split('_')[0]
         return name
+    
+    def get_power_amt(self, character, power_name):
+        for power in character.powers:
+            if power.power_name == power_name:
+                return power.amount
+        return 0
 
     def get_sync_commands(self, game):
         cmds = []
@@ -457,5 +463,24 @@ class AlphaStSBridge:
         cmds.append(f"sh {','.join([self.clean_card_name(c) for c in game.hand])}")
         cmds.append(f"sd {','.join([self.clean_card_name(c) for c in game.discard_pile])}")
         cmds.append(f"sx {','.join([self.clean_card_name(c) for c in game.exhaust_pile])}")
+
+        p_str = self.get_power_amt(game.player, "Strength")
+        p_dex = self.get_power_amt(game.player, "Dexterity")
+        p_art = self.get_power_amt(game.player, "Artifact")
+        p_vuln = self.get_power_amt(game.player, "Vulnerable")
+        p_weak = self.get_power_amt(game.player, "Weakened")
+        cmds.append(f"ps {p_str} {p_dex} {p_art} {p_vuln} {p_weak}")
+
+        alive_count = 0
+        for m in game.monsters:
+            if m.current_hp > 0:
+                m_str = self.get_power_amt(m, "Strength")
+                m_art = self.get_power_amt(m, "Artifact")
+                m_vuln = self.get_power_amt(m, "Vulnerable")
+                m_weak = self.get_power_amt(m, "Weakened")
+                m_poison = self.get_power_amt(m, "Poison")
+                cmds.append(f"es {alive_count} {m_str} {m_art} {m_vuln} {m_weak} {m_poison}")
+                alive_count += 1
+
         logger.debug(f"Generated Commands: {cmds}")
         return cmds
